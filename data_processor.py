@@ -199,8 +199,9 @@ class BulkDataDownloader:
         
         # Convert timestamps to datetime
         df = df.with_columns([
-            pl.col("open_time").map_elements(lambda x: datetime.fromtimestamp(x/1000)).alias("open_datetime"),
-            pl.col("close_time").map_elements(lambda x: datetime.fromtimestamp(x/1000)).alias("close_datetime")
+            # Use built-in datetime conversion with millisecond precision
+            pl.col("open_time").cast(pl.Datetime("ms")).alias("open_datetime"),
+            pl.col("close_time").cast(pl.Datetime("ms")).alias("close_datetime")
         ])
 
         return df
