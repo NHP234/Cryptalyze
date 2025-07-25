@@ -5,6 +5,10 @@ import requests
 from pathlib import Path
 import xml.etree.ElementTree as ET
 from datetime import datetime
+import os
+from dotenv import load_dotenv
+import psycopg2
+import psycopg2.extras
 
 from rich.console import Console
 from rich.panel import Panel
@@ -43,6 +47,11 @@ class BulkDataDownloader:
             "close_time", "quote_asset_volume", "number_of_trades",
             "taker_buy_base_volume", "taker_buy_quote_volume", "ignore"
         ]
+
+        load_dotenv()
+        self.db_url = os.environ.get("DATABASE_URL")
+        if not self.db_url:
+            raise ValueError("DATABASE_URL must be set in .env file")
 
     def get_file_list_from_s3_bucket(self, prefix):
         filenames = []
@@ -170,7 +179,42 @@ class BulkDataDownloader:
             print(f"Unexpected error while exporting CSV: {e}")
             raise
     
-    def get_polars_df(self, nfiles = None):
+    def upload_to_supabase(self, df: pl.DataFrame, table_name: str):
+        if df.is_empty():
+            print("DataFrame is empty, nothing to upload.")
+            return
+
+        records = list(df.iter_rows())
+
+        cols_sql = ", ".join(f'"{c}"' for c in df.columns)
+        update_cols_sql = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in df.columns if c != 'open_time')
+
+        # SQL for bulk upsert
+        insert_sql = (
+            f"INSERT INTO {table_name} ({cols_sql}) VALUES %s "
+            f"ON CONFLICT (open_time) DO UPDATE SET {update_cols_sql};"
+        )
+        
+        conn = None
+        try:
+            print(f"Connecting to the database...")
+            conn = psycopg2.connect(self.db_url)
+            with conn.cursor() as cur:
+                print(f"Uploading {len(records)} records to Supabase table '{table_name}' using psycopg2...")
+                psycopg2.extras.execute_values(cur, insert_sql, records, page_size=1000)
+                conn.commit()
+            print("Upload successful.")
+        except Exception as e:
+            print(f"Error uploading to Supabase with psycopg2: {e}")
+            if conn:
+                conn.rollback() # Rollback on error
+            raise
+        finally:
+            if conn:
+                conn.close()
+                print("Database connection closed.")
+
+    def get_polars_df(self, nfiles = None, upload=False, table_name="klines"):
         prefix = self.get_prefix()
         filenames = self.get_file_list_from_s3_bucket(prefix)
         download_urls = self.create_download_urls(filenames)
@@ -197,11 +241,12 @@ class BulkDataDownloader:
             )
             df = pl.concat([df, temp_df])
         
-        # Convert timestamps to datetime
         df = df.with_columns([
-            # Use built-in datetime conversion with millisecond precision
-            pl.col("open_time").cast(pl.Datetime("ms")).alias("open_datetime"),
-            pl.col("close_time").cast(pl.Datetime("ms")).alias("close_datetime")
+            pl.col("open_time").cast(pl.Datetime("ms", time_zone="UTC")).alias("open_datetime"),
+            pl.col("close_time").cast(pl.Datetime("ms", time_zone="UTC")).alias("close_datetime")
         ])
+
+        if upload:
+            self.upload_to_supabase(df, table_name)
 
         return df
