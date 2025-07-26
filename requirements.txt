@@ -2,3 +2,6 @@ polars
 requests
 rich
 websockets
+ta
+duckdb
+pandas
